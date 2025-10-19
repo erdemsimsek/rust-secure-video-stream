@@ -1,0 +1,9 @@
+[package]
+name = "streaming-codec"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+streaming-core = { path = "../core" }
+bytes = "1.5"
+thiserror = "1.0"

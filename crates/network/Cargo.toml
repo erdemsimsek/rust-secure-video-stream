@@ -1,0 +1,10 @@
+[package]
+name = "streaming-network"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+streaming-core = { path = "../core" }
+tokio = { version = "1.35", features = ["full"] }
+bytes = "1.5"
+thiserror = "1.0"

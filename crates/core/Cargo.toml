@@ -1,0 +1,9 @@
+[package]
+name = "streaming-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bytes = "1.5"
+thiserror = "1.0"
+async-trait = "0.1"

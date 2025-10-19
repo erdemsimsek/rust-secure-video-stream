@@ -1,0 +1,16 @@
+[package]
+name = "streaming-capture"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "streaming-capture"
+path = "src/main.rs"
+
+[dependencies]
+
+# Linux V4L2 support
+[target.'cfg(target_os = "linux")'.dependencies]
+chrono = "0.4.42"
+image = "0.25.8"
+rscam = "0.5.5"

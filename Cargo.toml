@@ -1,9 +1,19 @@
-[package]
-name = "camera_view"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = [
+    "crates/core",
+    "crates/capture",
+    "crates/codec",
+    "crates/network",
+    "crates/crypto",
+    "crates/ui",
+]
+resolver = "2"
 
-[dependencies]
-chrono = "0.4.42"
-image = "0.25.8"
-rscam = "0.5.5"
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Erdem Simsek"]
+license = "Apache-2.0"
+repository = "https://github.com/erdemsimsek/rust-secure-video-stream"
+
+[workspace.dependencies]

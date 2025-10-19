@@ -1,0 +1,8 @@
+[package]
+name = "streaming-crypto"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+streaming-core = { path = "../core" }
+thiserror = "1.0"

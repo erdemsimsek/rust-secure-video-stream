@@ -1032,6 +1032,7 @@ dependencies = [
  "chrono",
  "image",
  "rscam",
+ "streaming-core",
 ]
 
 [[package]]

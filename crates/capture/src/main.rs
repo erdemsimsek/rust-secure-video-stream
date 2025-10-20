@@ -1,43 +1,29 @@
-use rscam::{Camera, Config};
-use chrono::{DateTime, TimeZone, Utc};
-
-use image::load_from_memory;
+use streaming_capture::{discover_cameras, CameraInstance};
 
 fn main() {
+    let cameras = discover_cameras();
 
-    let camera = Camera::new("/dev/video0");
-
-    if let Ok(mut camera) = camera {
-
-        let config = Config{
-            interval: (1,30),
-            resolution: (1280, 720),
-            format: b"MJPG",
-            ..Default::default()
-        };
-
-
-        camera.start(&config).unwrap();
-
-        for i in 1..10 {
-            let frame = camera.capture().unwrap();
-            println!("Frame {} Timestamp{}", i, Utc.timestamp_nanos(frame.get_timestamp() as i64 * 1000));
-
-            image::load_from_memory(&frame).unwrap().save(format!("frame{}.jpg", i)).unwrap();
-        }
+    if cameras.is_empty() {
+        println!("No camera devices found in /dev/");
+        return;
     }
 
-    // if let Ok(camera) = camera {
-    //     println!("Supported formats:");
-    //     for format in camera.formats() {
-    //         if let Ok(format) = format {
-    //             println!("{:?}", format);
-    //             if let Ok(resolution) = camera.resolutions(&format.format) {
-    //                 println!("Supported resolutions: {:?}", resolution);
-    //             }
-    //         }
-    //     }
-    // }
+    println!("Found {} camera device(s)\n", cameras.len());
 
+    let mut camera_instances: Vec<CameraInstance> = cameras
+        .iter()
+        .map(|name| CameraInstance::new(name.to_string()))
+        .collect();
 
+    // Discover capabilities for each camera
+    for camera in &mut camera_instances {
+        camera.discover_capabilities();
+    }
+
+    // Print all discovered capabilities
+    println!("=== Camera Capabilities ===\n");
+    for camera in &camera_instances {
+        camera.print_capabilities();
+        println!();
+    }
 }

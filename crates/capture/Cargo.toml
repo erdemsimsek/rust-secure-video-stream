@@ -8,6 +8,7 @@ name = "streaming-capture"
 path = "src/main.rs"
 
 [dependencies]
+streaming-core = { path = "../core" }
 
 # Linux V4L2 support
 [target.'cfg(target_os = "linux")'.dependencies]

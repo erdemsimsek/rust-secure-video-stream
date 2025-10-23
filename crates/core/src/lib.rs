@@ -1,5 +1,15 @@
 
 
+use std::time::SystemTime;
+
+pub struct Frame {
+    pub format: PixelFormat,
+    pub width: u32,
+    pub height: u32,
+    pub timestamp: SystemTime,
+    pub sequence: usize,
+    pub data: Vec<u8>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelFormat {
@@ -22,6 +32,17 @@ impl PixelFormat {
             b"YU12" => PixelFormat::YU12,
             b"YV12" => PixelFormat::YV12,
             _ => PixelFormat::YUYV,  // Default fallback
+        }
+    }
+
+    pub fn to_fourcc(&self) -> [u8; 4] {
+        match self {
+            PixelFormat::MJPG => *b"MJPG",
+            PixelFormat::YUYV => *b"YUYV",
+            PixelFormat::RGB3 => *b"RGB3",
+            PixelFormat::BGR3 => *b"BGR3",
+            PixelFormat::YU12 => *b"YU12",
+            PixelFormat::YV12 => *b"YV12",
         }
     }
 }

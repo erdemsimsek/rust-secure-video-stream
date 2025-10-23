@@ -4,14 +4,60 @@
 //! using V4L2 on Linux.
 
 use std::path::Path;
+use std::time::SystemTime;
 use rscam::Camera;
-use streaming_core::{CameraCapabilities, FormatCapability, PixelFormat, Resolution};
+use streaming_core::{CameraCapabilities, FormatCapability, PixelFormat, Resolution, Frame};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum CaptureError {
+    #[error("Capabilities not discovered. Call discover_capabilities() first.")]
+    CapabilitiesNotDiscovered,
+
+    #[error("Unsupported format by camera: {0:?}")]
+    UnsupportedFormat(PixelFormat),
+
+    #[error("Resolution {0}x{1} not supported for format {2:?}")]
+    UnsupportedResolution(u32, u32, PixelFormat),
+
+    #[error("Camera not configured")]
+    NotConfigured,
+
+    #[error("IO error: {0}")]
+    IoError(String),
+}
+
+
+pub struct CaptureConfig {
+    pub format: PixelFormat,
+    pub resolution: Resolution,
+    pub fps: u32,
+}
+
+impl CaptureConfig {
+    pub fn new(format: PixelFormat, resolution: Resolution, fps: u32) -> Self {
+        Self {
+            format,
+            resolution,
+            fps,
+        }
+    }
+}
+
+
+pub trait CameraDevice {
+    fn start(&self);
+    fn capture(&self);
+}
 
 /// Represents a camera device instance with its capabilities
 pub struct CameraInstance {
     camera: Camera,
     pub name: String,
     pub capabilities: Option<CameraCapabilities>,
+    is_configured: bool,
+    current_config: Option<CaptureConfig>,
+    frame_sequence: usize,
 }
 
 impl CameraInstance {
@@ -23,12 +69,66 @@ impl CameraInstance {
     /// # Panics
     /// Panics if the camera device cannot be opened
     pub fn new(name: String) -> Self {
+        let camera = Camera::new(&name).map_err(
+            |e| CaptureError::IoError(format!("Failed to open camera: {}", e))
+        );
+
         Self {
-            camera: Camera::new(&name).unwrap(),
+            camera: camera.unwrap(),
             name,
             capabilities: None,
+            is_configured: false,
+            current_config: None,
+            frame_sequence: 0
         }
     }
+
+    pub fn configure(&mut self, width: u32, height: u32, fps: u32, format: PixelFormat) -> Result<(), CaptureError> {
+
+        if let Some(caps) = &self.capabilities {
+            let pixel_format = caps.formats.iter().find(|cap| cap.format == format).ok_or(CaptureError::UnsupportedFormat(format))?;
+            let resolution = pixel_format.resolutions.iter().find(|res| res.width == width && res.height == height).ok_or(CaptureError::UnsupportedResolution(width, height, format))?;
+
+            let fourcc = format.to_fourcc();
+
+            let config = rscam::Config {
+                interval: (1, fps),
+                resolution: (width, height),
+                format: &fourcc.to_vec(),
+                ..Default::default()
+            };
+
+            self.camera.start(&config).map_err(|e| CaptureError::IoError(format!("Failed to configure camera: {}", e)))?;
+
+            self.is_configured = true;
+            self.current_config = Some(CaptureConfig::new(format, *resolution, fps));
+
+            return Ok(());
+        }
+        Err(CaptureError::CapabilitiesNotDiscovered)
+    }
+
+    pub fn capture_frame(&mut self) -> Result<Frame, CaptureError> {
+        if !self.is_configured {
+            return Err(CaptureError::NotConfigured);
+        }
+
+        let captured_frame = self.camera.capture().map_err(|e| CaptureError::IoError(format!("Failed to capture frame: {}", e)))?;
+
+        self.frame_sequence += 1;
+
+        let frame = Frame {
+            format: PixelFormat::from_fourcc(&captured_frame.format),
+            width: captured_frame.resolution.0,
+            height: captured_frame.resolution.1,
+            timestamp: SystemTime::now(),
+            sequence: self.frame_sequence,
+            data: captured_frame.to_vec()
+        };
+
+        return Ok(frame);
+    }
+
 
     /// Discover all supported formats and resolutions for this camera
     pub fn discover_capabilities(&mut self) {
@@ -81,6 +181,7 @@ impl CameraInstance {
 
     /// Get reference to discovered capabilities
     pub fn get_capabilities(&self) -> Option<&CameraCapabilities> {
+
         self.capabilities.as_ref()
     }
 }

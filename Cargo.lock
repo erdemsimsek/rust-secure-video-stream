@@ -1034,6 +1034,7 @@ dependencies = [
  "rscam",
  "streaming-core",
  "thiserror 2.0.17",
+ "tokio",
 ]
 
 [[package]]

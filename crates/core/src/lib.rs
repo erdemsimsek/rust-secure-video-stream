@@ -2,6 +2,7 @@
 
 use std::time::SystemTime;
 
+#[derive(Debug)]
 pub struct Frame {
     pub format: PixelFormat,
     pub width: u32,

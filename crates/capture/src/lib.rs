@@ -306,6 +306,9 @@ impl CameraActor {
 
     fn stop_streaming(&mut self)  -> Result<(), CameraError> {
         if self.state == CameraState::Streaming {
+            // IMPORTANT: Update state BEFORE calling camera.stop()
+            // This prevents the actor loop from trying to capture after stop is called
+            self.state = CameraState::Configured;
             self.camera.stop().map_err(|e| CameraError::IoError(format!("Failed to stop camera: {}", e)))?;
             return Ok(());
         }
@@ -436,95 +439,127 @@ pub fn spawn_camera_actor(device_path: &str) -> Result<(CameraHandle, mpsc::Rece
 
 fn camera_actor_loop(mut actor: CameraActor, mut command_rx: mpsc::Receiver<CameraCommand>, event_tx: mpsc::Sender<CameraEvent>) {
     loop {
-        // Try to receive command (non-blocking)
-        match command_rx.try_recv() {
-            Ok(command) => {
-                match command {
-                    CameraCommand::SetInterface(device_path) => {
-                        match actor.set_interface(&device_path) {
-                            Ok(()) => {
-                                let _ = event_tx.blocking_send(CameraEvent::InterfaceChanged);
-                            }
-                            Err(e) => {
-                                let _ = event_tx.blocking_send(CameraEvent::Error(e));
-                            }
-                        }
-                    }
-                    CameraCommand::DiscoverCapabilities => {
-                        actor.discover_capabilities();
-                        if let Some(caps) = actor.capabilities.clone() {
-                            let _ = event_tx.blocking_send(CameraEvent::CapabilitiesDiscovered(caps));
-                        }
-                    }
-                    CameraCommand::GetConfiguration => {
-                        match actor.get_configuration() {
-                            Ok(config) => {
-                                let _ = event_tx.blocking_send(CameraEvent::ConfigurationRetrieved(config));
-                            }
-                            Err(e) => {
-                                let _ = event_tx.blocking_send(CameraEvent::Error(e));
-                            }
-                        }
-                    }
-                    CameraCommand::SetConfiguration{ width, height, fps, format } => {
-                        match actor.set_configuration(width, height, fps, format) {
-                            Ok(()) => {
-                                let _ = event_tx.blocking_send(CameraEvent::Configured);
-                            }
-                            Err(e) => {
-                                let _ = event_tx.blocking_send(CameraEvent::Error(e));
-                            }
-                        }
-                    }
-                    CameraCommand::StartStreaming => {
-                        match actor.start_streaming() {
-                            Ok(()) => {
-                                let _ = event_tx.blocking_send(CameraEvent::StreamingStarted);
-                            }
-                            Err(e) => {
-                                let _ = event_tx.blocking_send(CameraEvent::Error(e));
-                            }
-                        }
-                    }
-                    CameraCommand::StopStreaming => {
-                        match actor.stop_streaming() {
-                            Ok(()) => {
-                                let _ = event_tx.blocking_send(CameraEvent::StreamingStopped);
-                            }
-                            Err(e) => {
-                                let _ = event_tx.blocking_send(CameraEvent::Error(e));
-                            }
-                        }
-                    }
-                    CameraCommand::Shutdown => {
-                        // Stop streaming if active
-                        if actor.state == CameraState::Streaming {
-                            let _ = actor.stop_streaming();
-                        }
-                        // Send shutdown event
-                        let _ = event_tx.blocking_send(CameraEvent::ShutdownComplete);
-                        // Exit loop - thread will end naturally
-                        break;
+        // Different behavior based on streaming state
+        if actor.state == CameraState::Streaming {
+            // When streaming: check for commands quickly, then capture a frame
+            match command_rx.try_recv() {
+                Ok(command) => {
+                    // Process command (might change state to non-streaming)
+                    if handle_command(&mut actor, command, &event_tx) {
+                        break; // Shutdown requested
                     }
                 }
-            }
-            Err(mpsc::error::TryRecvError::Empty) => {
-                // No command waiting - that's fine, continue
-            }
-            Err(mpsc::error::TryRecvError::Disconnected) => {
-                // Channel closed - clean shutdown
-                if actor.state == CameraState::Streaming {
-                    let _ = actor.stop_streaming();
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    // No command, capture a frame
+                    if actor.state == CameraState::Streaming {
+                        if let Ok(frame) = actor.capture_frame() {
+                            let _ = event_tx.blocking_send(CameraEvent::FrameCaptured(frame));
+                        }
+                    }
                 }
-                break;
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    // Channel closed - clean shutdown
+                    if actor.state == CameraState::Streaming {
+                        let _ = actor.stop_streaming();
+                    }
+                    break;
+                }
+            }
+        } else {
+            // When NOT streaming: block waiting for commands (no CPU waste)
+            match command_rx.blocking_recv() {
+                Some(command) => {
+                    if handle_command(&mut actor, command, &event_tx) {
+                        break; // Shutdown requested
+                    }
+                }
+                None => {
+                    // Channel closed - clean shutdown
+                    break;
+                }
             }
         }
+    }
+}
 
-        // If streaming, capture and send frame
-        if actor.state == CameraState::Streaming {
-            if let Ok(frame) = actor.capture_frame() {
-                let _ = event_tx.blocking_send(CameraEvent::FrameCaptured(frame));
+/// Handle a single camera command. Returns true if shutdown was requested.
+fn handle_command(
+    actor: &mut CameraActor,
+    command: CameraCommand,
+    event_tx: &mpsc::Sender<CameraEvent>,
+) -> bool {
+    match command {
+        CameraCommand::SetInterface(device_path) => {
+            match actor.set_interface(&device_path) {
+                Ok(()) => {
+                    let _ = event_tx.blocking_send(CameraEvent::InterfaceChanged);
+                }
+                Err(e) => {
+                    let _ = event_tx.blocking_send(CameraEvent::Error(e));
+                }
             }
+            false
+        }
+        CameraCommand::DiscoverCapabilities => {
+            actor.discover_capabilities();
+            if let Some(caps) = actor.capabilities.clone() {
+                let _ = event_tx.blocking_send(CameraEvent::CapabilitiesDiscovered(caps));
+            }
+            false
+        }
+        CameraCommand::GetConfiguration => {
+            match actor.get_configuration() {
+                Ok(config) => {
+                    let _ = event_tx.blocking_send(CameraEvent::ConfigurationRetrieved(config));
+                }
+                Err(e) => {
+                    let _ = event_tx.blocking_send(CameraEvent::Error(e));
+                }
+            }
+            false
+        }
+        CameraCommand::SetConfiguration { width, height, fps, format } => {
+            match actor.set_configuration(width, height, fps, format) {
+                Ok(()) => {
+                    let _ = event_tx.blocking_send(CameraEvent::Configured);
+                }
+                Err(e) => {
+                    let _ = event_tx.blocking_send(CameraEvent::Error(e));
+                }
+            }
+            false
+        }
+        CameraCommand::StartStreaming => {
+            match actor.start_streaming() {
+                Ok(()) => {
+                    let _ = event_tx.blocking_send(CameraEvent::StreamingStarted);
+                }
+                Err(e) => {
+                    let _ = event_tx.blocking_send(CameraEvent::Error(e));
+                }
+            }
+            false
+        }
+        CameraCommand::StopStreaming => {
+            match actor.stop_streaming() {
+                Ok(()) => {
+                    let _ = event_tx.blocking_send(CameraEvent::StreamingStopped);
+                }
+                Err(e) => {
+                    let _ = event_tx.blocking_send(CameraEvent::Error(e));
+                }
+            }
+            false
+        }
+        CameraCommand::Shutdown => {
+            // Stop streaming if active
+            if actor.state == CameraState::Streaming {
+                let _ = actor.stop_streaming();
+            }
+            // Send shutdown event
+            let _ = event_tx.blocking_send(CameraEvent::ShutdownComplete);
+            // Return true to signal shutdown
+            true
         }
     }
 }

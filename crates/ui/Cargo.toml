@@ -9,3 +9,18 @@ path = "src/main.rs"
 
 [dependencies]
 streaming-core = { path = "../core" }
+streaming-capture = { path = "../capture" }
+
+# UI Framework
+eframe = { version = "0.28", features = ["wgpu"] }
+egui = "0.28"
+
+# Image processing
+image = "0.25"
+
+# Async runtime
+tokio = { version = "1.48", features = ["sync", "rt-multi-thread", "macros"] }
+
+# Utilities
+anyhow = "1.0"
+env_logger = "0.11"

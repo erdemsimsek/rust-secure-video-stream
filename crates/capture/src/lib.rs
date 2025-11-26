@@ -175,7 +175,7 @@ impl CaptureConfig {
 
 impl CameraActor {
     fn new(device_path: &str) -> Result<Self, CameraError> {
-        let camera = Camera::new(&device_path)
+        let camera = Camera::new(device_path)
             .map_err(|e| CameraError::IoError(format!("Failed to open: {}", e)))?;
 
         Ok(Self {
@@ -193,7 +193,7 @@ impl CameraActor {
             self.stop_streaming()?;
         }
 
-        let new_camera = Camera::new(&device_path).map_err(|e| CameraError::IoError(format!("Failed to open: {}", e)))?;
+        let new_camera = Camera::new(device_path).map_err(|e| CameraError::IoError(format!("Failed to open: {}", e)))?;
         self.camera = new_camera;
         self.name = device_path.to_string();
         self.state = CameraState::Idle;
@@ -206,28 +206,26 @@ impl CameraActor {
     fn discover_capabilities(&mut self) {
         let mut formats = Vec::new();
 
-        for format in self.camera.formats() {
-            if let Ok(format) = format {
-                let pixel_format = PixelFormat::from_fourcc(&format.format);
-                if let Ok(resolution_info) = self.camera.resolutions(&format.format) {
-                    let resolutions = match resolution_info {
-                        rscam::ResolutionInfo::Discretes(sizes) => {
-                            sizes
-                                .into_iter()
-                                .map(|(w, h)| Resolution {
-                                    width: w,
-                                    height: h,
-                                })
-                                .collect()
-                        }
-                        _ => Vec::new(),
-                    };
+        for format in self.camera.formats().flatten() {
+            let pixel_format = PixelFormat::from_fourcc(&format.format);
+            if let Ok(resolution_info) = self.camera.resolutions(&format.format) {
+                let resolutions = match resolution_info {
+                    rscam::ResolutionInfo::Discretes(sizes) => {
+                        sizes
+                            .into_iter()
+                            .map(|(w, h)| Resolution {
+                                width: w,
+                                height: h,
+                            })
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                };
 
-                    formats.push(FormatCapability {
-                        format: pixel_format,
-                        resolutions,
-                    });
-                }
+                formats.push(FormatCapability {
+                    format: pixel_format,
+                    resolutions,
+                });
             }
         }
 
@@ -243,7 +241,7 @@ impl CameraActor {
             let config = CaptureConfig{
                 format,
                 resolution: *resolution,
-                fps: fps,
+                fps,
             };
 
             self.config = Some(config);
@@ -257,9 +255,10 @@ impl CameraActor {
     fn get_configuration(&self) -> Result<CaptureConfig, CameraError> {
         if self.state == CameraState::Configured || self.state == CameraState::Streaming {
             let config = self.config.as_ref().unwrap().clone();
-            return Ok(config);
+            Ok(config)
+        } else {
+            Err(CameraError::NotConfigured)
         }
-        return Err(CameraError::NotConfigured);
     }
 
     fn capture_frame(&mut self) -> Result<Frame, CameraError> {
@@ -291,17 +290,19 @@ impl CameraActor {
                 interval: (1, config.fps),
                 resolution: (config.resolution.width, config.resolution.height),
                 format: &config.format.to_fourcc(),
+                nbuffers: 4,  // Use 4 buffers for better throughput (pipeline while processing)
                 ..Default::default()
             };
 
             self.camera.start(&rscam_config).map_err(|e| CameraError::IoError(format!("Failed to configure camera: {}", e)))?;
             self.state = CameraState::Streaming;
-            return Ok(());
+            Ok(())
         }
         else if self.state == CameraState::Streaming {
-            return Err(CameraError::AlreadyStreaming);
+            Err(CameraError::AlreadyStreaming)
+        } else {
+            Err(CameraError::NotConfigured)
         }
-        return Err(CameraError::NotConfigured);
     }
 
     fn stop_streaming(&mut self)  -> Result<(), CameraError> {
@@ -310,9 +311,10 @@ impl CameraActor {
             // This prevents the actor loop from trying to capture after stop is called
             self.state = CameraState::Configured;
             self.camera.stop().map_err(|e| CameraError::IoError(format!("Failed to stop camera: {}", e)))?;
-            return Ok(());
+            Ok(())
+        } else {
+            Err(CameraError::NotStreaming)
         }
-        return Err(CameraError::NotStreaming);
     }
 }
 
@@ -336,7 +338,7 @@ impl CameraHandle{
     /// # Ok::<(), streaming_capture::CameraError>(())
     /// ```
     pub fn send_command(&self, command: CameraCommand) -> Result<(), CameraError> {
-        return self.command_tx.blocking_send(command).map_err(|_| CameraError::IoError("Failed to send command".to_string()));
+        self.command_tx.blocking_send(command).map_err(|_| CameraError::IoError("Failed to send command".to_string()))
     }
 
     /// Gracefully shut down the camera actor and wait for the thread to exit.
@@ -434,7 +436,7 @@ pub fn spawn_camera_actor(device_path: &str) -> Result<(CameraHandle, mpsc::Rece
         join_handle: Some(join_handle),
     };
 
-    return Ok((handle, event_rx));
+    Ok((handle, event_rx))
 }
 
 fn camera_actor_loop(mut actor: CameraActor, mut command_rx: mpsc::Receiver<CameraCommand>, event_tx: mpsc::Sender<CameraEvent>) {
@@ -453,7 +455,8 @@ fn camera_actor_loop(mut actor: CameraActor, mut command_rx: mpsc::Receiver<Came
                     // No command, capture a frame
                     if actor.state == CameraState::Streaming {
                         if let Ok(frame) = actor.capture_frame() {
-                            let _ = event_tx.blocking_send(CameraEvent::FrameCaptured(frame));
+                            // Try to send frame, drop if channel is full (backpressure)
+                            let _ = event_tx.try_send(CameraEvent::FrameCaptured(frame));
                         }
                     }
                 }
@@ -574,12 +577,10 @@ pub fn discover_cameras() -> Vec<String> {
     let mut result = Vec::new();
 
     if let Ok(entries) = Path::new(VIDEO_INTERFACE_PATH).read_dir() {
-        for entry in entries {
-            if let Ok(entry) = entry {
-                let filename = entry.file_name().to_string_lossy().to_string();
-                if filename.starts_with(VIDEO_INTERFACE_PREFIX) {
-                    result.push(format!("{}{}", VIDEO_INTERFACE_PATH, filename));
-                }
+        for entry in entries.flatten() {
+            let filename = entry.file_name().to_string_lossy().to_string();
+            if filename.starts_with(VIDEO_INTERFACE_PREFIX) {
+                result.push(format!("{}{}", VIDEO_INTERFACE_PATH, filename));
             }
         }
     }

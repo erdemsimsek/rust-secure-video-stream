@@ -26,8 +26,8 @@ struct CameraViewerApp {
     camera_handle: Option<CameraHandle>,
     camera_state: CameraState,
 
-    // Frame display
-    current_frame: Arc<Mutex<Option<Frame>>>,
+    // Frame display - now stores pre-decoded RGB data
+    current_frame_rgb: Arc<Mutex<Option<DecodedFrame>>>,
     texture: Option<egui::TextureHandle>,
 
     // Statistics
@@ -35,6 +35,13 @@ struct CameraViewerApp {
 
     // Tokio runtime for async operations
     runtime: tokio::runtime::Runtime,
+}
+
+/// Pre-decoded RGB frame ready for display
+struct DecodedFrame {
+    rgb_data: Vec<u8>,
+    width: u32,
+    height: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -63,7 +70,7 @@ impl CameraViewerApp {
         Self {
             camera_handle: None,
             camera_state: CameraState::Disconnected,
-            current_frame: Arc::new(Mutex::new(None)),
+            current_frame_rgb: Arc::new(Mutex::new(None)),
             texture: None,
             stats: StreamStats::default(),
             runtime,
@@ -78,14 +85,25 @@ impl CameraViewerApp {
                 self.camera_handle = Some(handle);
                 self.camera_state = CameraState::Connected;
 
-                // Spawn task to receive events
-                let current_frame = Arc::clone(&self.current_frame);
+                // Spawn task to receive events and decode frames in background
+                let current_frame_rgb = Arc::clone(&self.current_frame_rgb);
                 self.runtime.spawn(async move {
                     while let Some(event) = events.recv().await {
                         match event {
                             CameraEvent::FrameCaptured(frame) => {
-                                let mut frame_lock = current_frame.lock().await;
-                                *frame_lock = Some(frame);
+                                // Decode frame to RGB
+                                let rgb_data = convert_frame_to_rgb(&frame);
+
+                                // Store pre-decoded RGB
+                                let decoded = DecodedFrame {
+                                    rgb_data,
+                                    width: frame.width,
+                                    height: frame.height,
+                                };
+
+                                // Update shared frame buffer
+                                let mut frame_lock = current_frame_rgb.lock().await;
+                                *frame_lock = Some(decoded);
                             }
                             CameraEvent::Error(e) => {
                                 eprintln!("Camera error: {}", e);
@@ -119,7 +137,7 @@ impl CameraViewerApp {
                 width: 640,
                 height: 480,
                 fps: 30,
-                format: PixelFormat::MJPG, // Try MJPEG first, fallback to YUYV if needed
+                format: PixelFormat::YUYV, // YUYV is much faster than MJPEG (no JPEG decode)
             }) {
                 eprintln!("Failed to configure camera: {}", e);
                 return;
@@ -157,9 +175,8 @@ impl CameraViewerApp {
     }
 
     fn update_texture(&mut self, ctx: &egui::Context) {
-        // Try to get the latest frame without blocking
-        if let Ok(mut frame_lock) = self.current_frame.try_lock() {
-            if let Some(frame) = frame_lock.take() {
+        if let Ok(mut frame_lock) = self.current_frame_rgb.try_lock() {
+            if let Some(decoded) = frame_lock.take() {
                 // Update stats
                 self.stats.frames_received += 1;
                 if let Some(last_time) = self.stats.last_frame_time {
@@ -170,16 +187,13 @@ impl CameraViewerApp {
                 }
                 self.stats.last_frame_time = Some(std::time::Instant::now());
 
-                // Convert frame to RGB
-                let rgb_data = convert_frame_to_rgb(&frame);
-
-                // Create egui ColorImage
+                // Create color image from RGB data
                 let color_image = egui::ColorImage::from_rgb(
-                    [frame.width as usize, frame.height as usize],
-                    &rgb_data,
+                    [decoded.width as usize, decoded.height as usize],
+                    &decoded.rgb_data,
                 );
 
-                // Create or update texture
+                // Upload texture to GPU
                 if let Some(texture) = &mut self.texture {
                     texture.set(color_image, egui::TextureOptions::LINEAR);
                 } else {
